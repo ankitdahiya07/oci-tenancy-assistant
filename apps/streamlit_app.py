@@ -1,13 +1,21 @@
-﻿import time
+import time
 from datetime import datetime, timezone
+from pathlib import Path
+import sys
 
 import streamlit as st
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from tenancy_assistant.genai_assistant import (
     get_public_ip_summary,
     get_cost_summary,
+    get_cloud_guard_summary,
     chat_with_public_ip_using_cached_result,
     chat_with_cost_using_cached_result,
+    chat_with_cloud_guard_using_cached_result,
 )
 
 # --------- PAGE CONFIG & BASIC STYLE ---------
@@ -120,7 +128,7 @@ st.markdown(
 # --------- MODE SELECTION ---------
 mode = st.radio(
     "View",
-    options=["Public IPs", "Cost"],
+    options=["Public IPs", "Cost", "Cloud Guard"],
     horizontal=True,
     index=0,
 )
@@ -128,7 +136,7 @@ mode = st.radio(
 
 # --------- CACHE HELPERS ---------
 
-@st.cache_data(ttl=600)  # 10 minutes cache
+@st.cache_data(ttl=1800)  # 30 minutes cache
 def get_cached_public_ip_summary():
     data = get_public_ip_summary({"scope": "ALL"})
     return {
@@ -137,7 +145,7 @@ def get_cached_public_ip_summary():
     }
 
 
-@st.cache_data(ttl=600)  # 10 minutes cache
+@st.cache_data(ttl=1800)  # 30 minutes cache
 def get_cached_cost_summary(time_start: str, time_end: str):
     data = get_cost_summary({
         "granularity": "MONTHLY",
@@ -150,11 +158,23 @@ def get_cached_cost_summary(time_start: str, time_end: str):
         "fetched_at": time.time(),
     }
 
+@st.cache_data(ttl=1800)  # 30 minutes cache
+def get_cached_cloud_guard_summary(include_endpoints: bool = True):
+    data = get_cloud_guard_summary({
+        "include_endpoints": include_endpoints,
+        "max_problems": 10,
+        "max_endpoints_per_problem": 10,
+    })
+    return {
+        "data": data,
+        "fetched_at": time.time(),
+    }
+
 
 # --------- SESSION STATE ---------
 if "history" not in st.session_state:
     # history is per-mode: {"Public IPs": [...], "Cost": [...]}
-    st.session_state.history = {"Public IPs": [], "Cost": []}
+    st.session_state.history = {"Public IPs": [], "Cost": [], "Cloud Guard": []}
 
 
 # --------- LAYOUT: TWO COLUMNS ---------
@@ -234,7 +254,7 @@ with left_col:
             """
         )
 
-    else:  # mode == "Cost"
+    elif mode == "Cost":
         st.subheader("Cost snapshot")
 
         # ---- COST WINDOW PRESET SELECTOR ----
@@ -357,6 +377,85 @@ with left_col:
             - Mention that data comes from OCI Usage API via your MCP cost tool.
             """
         )
+    else:  # mode == "Cloud Guard"
+        st.subheader("Cloud Guard snapshot")
+
+        if st.button("Preload Cloud Guard snapshot"):
+            with st.spinner("Loading Cloud Guard summary (first call may take a while)..."):
+                snapshot = get_cached_cloud_guard_summary(include_endpoints=False)
+            st.success("Cloud Guard snapshot cached. Questions will now be faster.")
+
+        try:
+            snapshot = get_cached_cloud_guard_summary(include_endpoints=False)
+            summary = snapshot["data"]
+            fetched_dt = datetime.fromtimestamp(snapshot["fetched_at"]).strftime("%Y-%m-%d %H:%M:%S")
+            total_targets = summary.get("total_targets", "-")
+            total_problems = summary.get("total_problems", "-")
+            by_risk = summary.get("problems_by_risk", {})
+
+            st.markdown(
+                f"""
+                <div class="info-card">
+                    <h4>Cloud Guard snapshot</h4>
+                    <div class="info-metric">
+                        <span>Total targets</span>
+                        <span class="value">{total_targets}</span>
+                    </div>
+                    <div class="info-metric">
+                        <span>Total problems</span>
+                        <span class="value">{total_problems}</span>
+                    </div>
+                    <div style="margin-top:0.55rem; font-size:0.85rem;">
+                        Problems by risk:
+                    </div>
+                """
+                + "".join(
+                    f"""
+                    <div class="info-metric">
+                        <span>{risk}</span>
+                        <span class="value">{count}</span>
+                    </div>
+                    """
+                    for risk, count in sorted(by_risk.items())
+                )
+                + f"""
+                    <div style="margin-top:0.55rem; font-size:0.8rem; opacity:0.8;">
+                        Snapshot time: <code>{fetched_dt}</code> (approximate)
+                    </div>
+                    <div style="margin-top:0.35rem; font-size:0.78rem; opacity:0.75;">
+                        Data is cached for ~10 minutes to keep responses fast.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        except Exception as e:
+            st.markdown(
+                f"""
+                <div class="info-card">
+                    <h4>Cloud Guard snapshot</h4>
+                    <div style="font-size:0.85rem;">
+                        No snapshot available yet.<br/>
+                        <span style="opacity:0.8;">Use the preload button above or just ask a question.</span>
+                    </div>
+                    <div style="margin-top:0.4rem; font-size:0.78rem; opacity:0.7;">
+                        Technical detail: {e}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("### Tips for your demo (Cloud Guard)")
+        st.markdown(
+            """
+            - Try asking:
+              - *Show me Cloud Guard problems by risk level.*
+              - *List Cloud Guard targets and their resource type.*
+              - *Which problems have endpoints?*
+            - Cloud Guard endpoints are pulled from recent problems (sampled).
+            """
+        )
 
 
 # --------- RIGHT COLUMN: CHAT UI ---------
@@ -369,11 +468,12 @@ with right_col:
             st.markdown(msg["content"])
 
     # Chat input
-    placeholder = (
-        "Ask something like: How many public IPs do I have?"
-        if mode == "Public IPs"
-        else "Ask something like: What is my total cost this month?"
-    )
+    if mode == "Public IPs":
+        placeholder = "Ask something like: How many public IPs do I have?"
+    elif mode == "Cost":
+        placeholder = "Ask something like: What is my total cost this month?"
+    else:
+        placeholder = "Ask something like: Show Cloud Guard problems by risk."
     user_input = st.chat_input(placeholder)
 
     if user_input:
@@ -393,11 +493,18 @@ with right_col:
                             user_input,
                             tool_data,
                         )
-                    else:  # Cost
+                    elif mode == "Cost":
                         time_start, time_end = get_date_range_for_preset(preset)
                         snapshot = get_cached_cost_summary(time_start, time_end)
                         tool_data = snapshot["data"]
                         answer = chat_with_cost_using_cached_result(
+                            user_input,
+                            tool_data,
+                        )
+                    else:  # Cloud Guard
+                        snapshot = get_cached_cloud_guard_summary(include_endpoints=True)
+                        tool_data = snapshot["data"]
+                        answer = chat_with_cloud_guard_using_cached_result(
                             user_input,
                             tool_data,
                         )

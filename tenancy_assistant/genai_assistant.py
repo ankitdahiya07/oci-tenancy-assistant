@@ -184,6 +184,20 @@ def get_cost_summary(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     return call_mcp_server("getCostSummary", params)
 
+def get_cloud_guard_summary(params: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Convenience wrapper to call getCloudGuardSummary via MCP.
+    Example params:
+      {
+        "include_endpoints": true,
+        "max_problems": 10,
+        "max_endpoints_per_problem": 10
+      }
+    """
+    if params is None:
+        params = {"include_endpoints": True}
+    return call_mcp_server("getCloudGuardSummary", params)
+
 
 # =========================
 # 3. TOOL SELECTION + ANSWERING LOGIC
@@ -198,26 +212,41 @@ def decide_tool_and_args(client, question: str) -> Dict[str, Any]:
 You are an OCI Tenancy Assistant tool router.
 You MUST respond with a single JSON object ONLY, no extra text.
 
-Available tool:
+Available tools:
 - name: getPublicIpSummary
   description: Get a summary of public IP addresses in the OCI tenancy
                or a specific compartment.
   parameters:
     - compartment_ocid (string, optional)
     - scope (string, optional): one of ALL, EPHEMERAL, RESERVED. Default: ALL.
+- name: getCostSummary
+  description: Get a cost summary for the tenancy (Usage API).
+  parameters:
+    - time_start (string, optional ISO 8601)
+    - time_end (string, optional ISO 8601)
+    - granularity (string, optional): DAILY or MONTHLY
+    - group_by (string, optional): COMPARTMENT, SERVICE, RESOURCE
+- name: getCloudGuardSummary
+  description: Get Cloud Guard targets, problems, and (optionally) problem endpoints.
+  parameters:
+    - compartment_ocid (string, optional)
+    - include_endpoints (bool, optional)
+    - max_problems (int, optional)
+    - max_endpoints_per_problem (int, optional)
 
 Your job:
 - Read the user question.
-- Decide whether getPublicIpSummary is needed.
-- If yes, output JSON:
-  {
-    "tool": "getPublicIpSummary",
-    "arguments": {
-      "scope": "ALL"
-    }
-  }
+- Choose the most appropriate tool (or null if none apply).
+- For public IP questions, use getPublicIpSummary with scope ALL unless the user asks EPHEMERAL or RESERVED.
+- For cost questions, use getCostSummary (default granularity MONTHLY, group_by COMPARTMENT).
+- For Cloud Guard questions, use getCloudGuardSummary; include_endpoints should be true if the user asks about endpoints.
 
-If the user's question is NOT about public IPs, output:
+Example outputs:
+  { "tool": "getPublicIpSummary", "arguments": { "scope": "ALL" } }
+  { "tool": "getCostSummary", "arguments": { "granularity": "MONTHLY", "group_by": "COMPARTMENT" } }
+  { "tool": "getCloudGuardSummary", "arguments": { "include_endpoints": true, "max_problems": 10, "max_endpoints_per_problem": 10 } }
+
+If the user's question is NOT about any tool above, output:
   {
     "tool": null,
     "arguments": {}
@@ -299,6 +328,14 @@ def chat_with_cost_using_cached_result(question: str, tool_result: Dict[str, Any
     # but pass the tool name "getCostSummary" so the prompt can mention "cost".
     return answer_with_tool_result(client, question, "getCostSummary", tool_result)
 
+def chat_with_cloud_guard_using_cached_result(question: str, tool_result: Dict[str, Any]) -> str:
+    """
+    Use OCI GenAI to answer a Cloud Guard question using an ALREADY computed
+    getCloudGuardSummary JSON result.
+    """
+    client = get_genai_client()
+    return answer_with_tool_result(client, question, "getCloudGuardSummary", tool_result)
+
 
 
 def chat_with_tenancy_assistant_oci(question: str) -> str:
@@ -326,7 +363,7 @@ say you don't have direct data access in this mode.
         prompt = f"{direct_system}\n\nUser question:\n{question}\n\nAnswer:"
         return genai_chat(client, prompt)
 
-    if tool != "getPublicIpSummary":
+    if tool not in ("getPublicIpSummary", "getCostSummary", "getCloudGuardSummary"):
         raise RuntimeError(f"Unknown tool requested by model: {tool}")
 
     # Step 2: call MCP server with that tool

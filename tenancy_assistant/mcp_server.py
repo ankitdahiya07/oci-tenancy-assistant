@@ -44,6 +44,15 @@ def get_identity_client(config):
 def get_core_client(config):
     return oci.core.VirtualNetworkClient(config)
 
+def get_cloud_guard_client(config):
+    return oci.cloud_guard.CloudGuardClient(config)
+
+
+def _isoformat(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
 
 def list_all_compartments(identity_client, tenancy_id):
     compartments = []
@@ -116,6 +125,130 @@ def tool_get_public_ip_summary(params, config):
         "total_count": total_filtered,
         "by_scope": by_scope,
         "items": filtered_items,
+    }
+
+# ---------- CLOUD GUARD SUMMARY TOOL ------------------------------------------------------------------------------
+
+def _clamp_int(value, default, min_value=1, max_value=100):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(min_value, min(max_value, value))
+
+
+def tool_get_cloud_guard_summary(params, config):
+    """
+    Get Cloud Guard targets, problems, and optionally problem endpoints.
+
+    Params (JSON):
+      - compartment_ocid (string, optional)
+      - include_endpoints (bool, optional) : default False
+      - max_problems (int, optional) : default 10 (only when include_endpoints=True)
+      - max_endpoints_per_problem (int, optional) : default 10
+    """
+    cloud_guard_client = get_cloud_guard_client(config)
+    compartment_id = params.get("compartment_ocid") or config["tenancy"]
+    include_endpoints = bool(params.get("include_endpoints", False))
+    max_problems = _clamp_int(params.get("max_problems", 10), 10)
+    max_endpoints_per_problem = _clamp_int(params.get("max_endpoints_per_problem", 10), 10)
+
+    # Targets
+    target_response = oci.pagination.list_call_get_all_results(
+        cloud_guard_client.list_targets,
+        compartment_id=compartment_id,
+    )
+    targets = []
+    for t in target_response.data:
+        targets.append(
+            {
+                "id": t.id,
+                "display_name": t.display_name,
+                "lifecycle_state": t.lifecycle_state,
+                "target_resource_type": t.target_resource_type,
+                "target_resource_id": t.target_resource_id,
+                "recipe_count": getattr(t, "recipe_count", None),
+                "time_created": _isoformat(getattr(t, "time_created", None)),
+                "time_updated": _isoformat(getattr(t, "time_updated", None)),
+            }
+        )
+
+    # Problems
+    problem_response = oci.pagination.list_call_get_all_results(
+        cloud_guard_client.list_problems,
+        compartment_id=compartment_id,
+    )
+    problems = problem_response.data
+    problems_by_risk = {}
+    problems_by_lifecycle = {}
+    for p in problems:
+        if p.risk_level:
+            problems_by_risk[p.risk_level] = problems_by_risk.get(p.risk_level, 0) + 1
+        if p.lifecycle_detail:
+            problems_by_lifecycle[p.lifecycle_detail] = problems_by_lifecycle.get(p.lifecycle_detail, 0) + 1
+
+    problem_items = []
+    for p in problems:
+        problem_items.append(
+            {
+                "id": p.id,
+                "risk_level": p.risk_level,
+                "lifecycle_detail": p.lifecycle_detail,
+                "resource_name": p.resource_name,
+                "resource_type": p.resource_type,
+                "region": p.region,
+                "time_first_detected": _isoformat(p.time_first_detected),
+                "time_last_detected": _isoformat(p.time_last_detected),
+            }
+        )
+
+    endpoints_by_problem = []
+    if include_endpoints:
+        for p in problems[:max_problems]:
+            try:
+                endpoints_resp = cloud_guard_client.list_problem_endpoints(
+                    problem_id=p.id,
+                    limit=max_endpoints_per_problem,
+                )
+                endpoints = []
+                for ep in endpoints_resp.data:
+                    endpoints.append(
+                        {
+                            "id": ep.id,
+                            "ip_address": getattr(ep, "ip_address", None),
+                            "ip_address_type": getattr(ep, "ip_address_type", None),
+                            "ip_classification_type": getattr(ep, "ip_classification_type", None),
+                            "country": getattr(ep, "country", None),
+                            "regions": getattr(ep, "regions", None),
+                            "services": getattr(ep, "services", None),
+                            "time_last_detected": _isoformat(getattr(ep, "time_last_detected", None)),
+                        }
+                    )
+            except Exception:
+                endpoints = []
+
+            endpoints_by_problem.append(
+                {
+                    "problem_id": p.id,
+                    "resource_name": p.resource_name,
+                    "risk_level": p.risk_level,
+                    "endpoints": endpoints,
+                }
+            )
+
+    return {
+        "total_targets": len(targets),
+        "targets": targets,
+        "total_problems": len(problems),
+        "problems_by_risk": problems_by_risk,
+        "problems_by_lifecycle": problems_by_lifecycle,
+        "problems": problem_items,
+        "endpoints_by_problem": endpoints_by_problem,
+        "endpoints_included": include_endpoints,
+        "endpoints_limits": {
+            "max_problems": max_problems,
+            "max_endpoints_per_problem": max_endpoints_per_problem,
+        },
     }
 
 # ---------- COST SUMMARY TOOL (USAGE API) ----------------------------------------------------------------------------------
@@ -354,6 +487,8 @@ def handle_request(req: dict, config):
     try:
         if method == "getPublicIpSummary":
             result = tool_get_public_ip_summary(params, config)
+        elif method == "getCloudGuardSummary":
+            result = tool_get_cloud_guard_summary(params, config)
         elif method == "getCostSummary":
             result = tool_get_cost_summary(params, config)
         else:

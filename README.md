@@ -1,6 +1,6 @@
 ﻿# OCI Tenancy Assistant
 
-A small OCI tenancy assistant that combines OCI Generative AI with a local MCP-style JSON-RPC server to answer tenancy questions and visualize public IP and cost summaries.
+A small OCI tenancy assistant that combines OCI Generative AI with a local MCP-style JSON-RPC server to answer tenancy questions and visualize public IP, cost, and Cloud Guard summaries.
 
 ## Repo structure
 
@@ -54,6 +54,6 @@ streamlit run apps\streamlit_app.py
 
 ## Notes
 
-- `tenancy_assistant/mcp_server.py` exposes `getPublicIpSummary` and `getCostSummary` over JSON-RPC.
-- The Streamlit UI caches tenancy snapshots for 10 minutes to keep responses fast.
+- `tenancy_assistant/mcp_server.py` exposes `getPublicIpSummary`, `getCostSummary`, and `getCloudGuardSummary` over JSON-RPC.
+- The Streamlit UI caches tenancy snapshots for 30 minutes to keep responses fast.
 - If you plan to publish this repo, keep real OCIDs and tenancy identifiers out of source control.
